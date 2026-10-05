@@ -1,0 +1,4 @@
+# Laid by the engine when it loads the mod: its own API and tool types.
+.claude-plugin/types/
+.DS_Store
+node_modules/

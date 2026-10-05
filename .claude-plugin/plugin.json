@@ -1,0 +1,26 @@
+{
+  "name": "trail",
+  "version": "0.1.0",
+  "description": "Keeps what a session leaves open in view above the prompt: tasks in progress or unfinished, and the forks raised and not taken up. Off until you type /trail.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "detourDepth": {
+      "type": "number",
+      "title": "Tripwire: detour depth",
+      "description": "The tripwire fires when detours are nested this deep.",
+      "default": 2
+    },
+    "detourMinutes": {
+      "type": "number",
+      "title": "Tripwire: minutes in detours",
+      "description": "The tripwire fires after this many working minutes away from the main line.",
+      "default": 30
+    },
+    "detourPrompts": {
+      "type": "number",
+      "title": "Tripwire: prompts in detours",
+      "description": "The tripwire fires after this many of your prompts away from the main line.",
+      "default": 5
+    }
+  }
+}
