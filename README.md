@@ -22,7 +22,7 @@ and every loose end, sorted into the ones that wait for **your decision** and
 the ones that were only **noted**.
 
 ```
-╭─ Trail ──────────────────── 3 forks open, 1 for you to decide ─ [-]
+╭─ Trail ────────────────────── 3 forks open, 1 for you to decide [-]
 │ ▸ Speed up the import                                              │
 │ └ ○ Add a benchmark                                                │
 │ FOR YOU TO DECIDE                                                  │
@@ -84,7 +84,9 @@ names the session, `/trail back`, `/trail done [outcome]` and
 `/trail drop [reason]` end the current task by hand, `/trail clear` starts a
 fresh tree.
 
-Mouse clicks need the fullscreen layout, which is the default outside tmux.
+Clicks need the fullscreen layout, see [Installing](#installing). In the
+classic layout the `[-]` is drawn all the same but does nothing;
+`ctrl+x ctrl+a` folds the strip in both.
 
 ## How it works
 
@@ -114,12 +116,27 @@ one was built on 2.1.289. Load the folder in every session by naming it in
 
 ```json
 {
+  "tui": "fullscreen",
   "env": { "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/trail" },
   "permissions": { "allow": ["mcp__trail__track"] }
 }
 ```
 
 or for one session with `claude --plugin-dir /path/to/trail`.
+
+trail needs the fullscreen layout. `"tui": "fullscreen"` sets it for every new
+session, and `/tui fullscreen` switches a running one. Claude Code reads the
+mouse only in that layout, so only there can you click `[-]`, a fork or the
+closed row. In the classic layout (`"tui": "default"`) the strip is still
+shown, but nothing in it reacts to a click and the keyboard is the only way to
+use it.
+
+Copying text works differently in the fullscreen layout: Claude Code does the
+selecting itself and hands the text to your terminal's clipboard. Over SSH the
+terminal has to allow that. In iTerm2 tick Settings → General → Selection →
+"Applications in terminal may access clipboard". Without it a selection looks
+fine but the clipboard keeps its old content. Holding Option while dragging
+selects the way the terminal always did and copies in any case.
 
 A session that loads the folder this way watches it: every saved change
 reloads the mod and prints one line into that session. Keep a separate working

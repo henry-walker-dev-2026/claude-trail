@@ -95,7 +95,7 @@ const rowsOf = async (pane: { findAll: (query: { type: string }) => Promise<{ ch
     .filter(row => row !== false && row !== null && row !== undefined)
     .map(textOf)
     .filter(row => !row.startsWith('╰'))
-    .map(row => row.replace(/^╭─ Trail ─+ ?(.*) ─$/, 'Trail$1').replace(/^│ (.*) │$/, '$1'))
+    .map(row => row.replace(/^╭─ Trail ─+ ?(.*)$/, 'Trail$1').replace(/^│ (.*) │$/, '$1'))
 
 /** The rows of the tree: what follows the blank row under the pane's header. */
 const tree = (rows: string[]) => rows.slice(rows.indexOf(' ') + 1)

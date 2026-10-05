@@ -1223,10 +1223,9 @@ export const register: Register = (on, options) => {
     // On the terminal the frame is drawn by hand, so that its top edge can carry the title and the
     // counts and end where the engine's [-] stands: a title bar with its toggle at the right end.
     const head = '╭─ '
-    const tail = ' ─'
-    const said = stats.slice(0, Math.max(0, e.props.bodyColumns - head.length - 'Trail'.length - tail.length - 6))
+    const said = stats.slice(0, Math.max(0, e.props.bodyColumns - head.length - 'Trail'.length - 6))
     const rule = '─'.repeat(
-      Math.max(1, e.props.bodyColumns - head.length - 'Trail'.length - said.length - tail.length - (said === '' ? 1 : 2)),
+      Math.max(1, e.props.bodyColumns - head.length - 'Trail'.length - said.length - (said === '' ? 1 : 2)),
     )
     const framed = [...drawRows($, e, shown), more, fewer].filter(row => row !== false)
 
@@ -1239,7 +1238,6 @@ export const register: Register = (on, options) => {
           </Text>
           <Text dimColor>{` ${rule}${said === '' ? '' : ' '}`}</Text>
           {held.isTripped ? <Text color="warning">{said}</Text> : <Text dimColor>{said}</Text>}
-          <Text dimColor>{tail}</Text>
         </Box>
         {framed.map(row => (
           <Box width={wide}>
