@@ -1304,3 +1304,25 @@ test('what the model is shown of the tree leaves the finished branches out unles
   )
   expect(await track($, { action: 'show', title: 'all' })).toContain('  ✓ Static checks [n2] (all three clean)')
 })
+
+test('a job started between tasks is shown while it runs and not after', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await $.tool.call({
+    tool: 'Bash',
+    command: 'sleep 600',
+    description: 'Wait for the build to end',
+    run_in_background: true,
+  })
+
+  expect(tree(await paneTexts($))).toEqual(['● shell · Wait for the build to end · under 1 min'])
+
+  await $.prompt.submit({
+    text: '<task-notification>\n<task-id>bash-1</task-id>\n<status>completed</status>\n</task-notification>',
+    wait: false,
+    origin: { kind: 'task-notification' },
+  })
+
+  expect(await paneTexts($)).not.toContain('✓ shell · Wait for the build to end · done after under 1 min')
+  expect((await paneTexts($)).some(row => row.includes('Wait for the build'))).toBe(false)
+})

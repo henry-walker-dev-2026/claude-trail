@@ -880,7 +880,9 @@ export const paneRows = (
     const shown: (TrailNode | TrailParked | TrailWork | Group | number)[] = [
       ...kids.filter(one => !isClosed(one)),
       ...(isRoot ? [] : forks),
-      ...work.filter(item => item.nodeId === node.id && isTop(item)),
+      // Under a task a finished job stays until the task folds away; the session never folds,
+      // so a job started between tasks is shown only while it runs.
+      ...work.filter(item => item.nodeId === node.id && isTop(item) && (!isRoot || item.state === 'running')),
       ...groups,
       ...(older.length > 0 ? [older.length] : []),
       ...(isUnfolded ? older : []),
