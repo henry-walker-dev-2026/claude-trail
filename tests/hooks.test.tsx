@@ -1252,7 +1252,27 @@ test('where no pane docks, the tree stands in the band above the prompt, cut to 
 
   await press(/2 more noted/)
 
-  expect((await rowsOf(band)).slice(-3)).toEqual(['├ · Fork eight [p9]', '└ · Fork nine [p10]', '▴ show fewer'])
+  // The whole tree, in pages of the same height as the strip: the box never grows, nothing scrolls.
+  expect(await rowsOf(band)).toEqual([
+    'Trail9 forks open',
+    'NOTED, NOT DONE',
+    '├ · Fork one [p2]',
+    '├ · Fork two [p3]',
+    '├ · Fork three [p4]',
+    '├ · Fork four [p5]',
+    '├ · Fork five [p6]',
+    '├ · Fork six [p7]',
+    '▴ show fewermore ▸ 1/2',
+  ])
+
+  await press(/more ▸ 1\/2/)
+
+  expect((await rowsOf(band)).slice(-4)).toEqual([
+    '├ · Fork seven [p8]',
+    '├ · Fork eight [p9]',
+    '└ · Fork nine [p10]',
+    '▴ show fewer◂ back',
+  ])
 
   // The rows are pressable here as in the pane.
   await press(/Fork nine/)
@@ -1261,10 +1281,22 @@ test('where no pane docks, the tree stands in the band above the prompt, cut to 
     '└ ▾ Fork nine [p10]',
     '    raised under 1 min ago',
     '    take up  drop',
-    '▴ show fewer',
+    '▴ show fewer◂ back',
   ])
 
+  await press(/back/)
+
+  expect((await rowsOf(band))[1]).toBe('NOTED, NOT DONE')
+
   await press(/show fewer/)
+
+  // Fork nine is still opened up: in the strip too it takes its detail and its actions rows, so fewer fit.
+  expect((await rowsOf(band)).slice(1, 4)).toEqual(['▾ Fork nine [p10] · under 1 min', '  raised under 1 min ago', '  take up  drop'])
+  expect((await rowsOf(band)).at(-1)).toBe('▾ 4 more noted')
+
+  await press(/Fork nine/)
+
+  expect((await rowsOf(band)).at(-1)).toBe('▾ 2 more noted')
   await band.unmount()
 
   // No second box beside it: /trail opens no pane in this layout.
@@ -1707,40 +1739,4 @@ test('"under" must name a task not finished, and a node that exists keeps its pl
 
   expect(await track($, { action: 'enter', title: 'n4', under: 'session' })).toContain('already has its place')
   expect(await track($, { action: 'confirm' })).toContain('Session › B › C')
-})
-
-test('the title row stays in view while the person scrolls inside the box', async ($, on) => {
-  await boot($, on)
-  await command($, '')
-
-  for (const title of ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine']) {
-    await track($, { action: 'park', title: `Fork ${title}` })
-  }
-
-  const INLINE = { ...BAND, surface: 'terminal', viewport: { columns: 120, rows: 48, isFullscreen: false } } as const
-  const band = await $.ui.mount(INLINE)
-
-  await band.press({ key: (await band.find({ type: 'Button', text: /2 more noted/ }))?.key ?? '' })
-  await band.unmount()
-
-  // Opened whole, the tree is ten rows under the title. Scrolled three rows down, the engine's window
-  // begins at the tree's third row: the title is drawn there, and the three rows above are out of sight.
-  const scrolled = await $.ui.mount({ ...INLINE, props: { ...INLINE.props, scroll: { offset: 3, bodyRows: 6 } } })
-  const rows = await rowsOf(scrolled)
-
-  expect(rows.slice(0, 5)).toEqual([
-    'NOTED, NOT DONE',
-    '├ · Fork one [p2]',
-    '├ · Fork two [p3]',
-    'Trail9 forks open',
-    '├ · Fork three [p4]',
-  ])
-  expect(rows.at(-1)).toBe('▴ show fewer')
-  await scrolled.unmount()
-
-  // Back at the top, the title is the first row again.
-  const top = await $.ui.mount(INLINE)
-
-  expect((await rowsOf(top))[0]).toBe('Trail9 forks open')
-  await top.unmount()
 })

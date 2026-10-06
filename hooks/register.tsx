@@ -47,8 +47,8 @@ const trail = atom({ plugin: 'trail', key: 'trail' } as const, EMPTY)
 const work = atom({ plugin: 'trail', key: 'work' } as const, [])
 /** The fork opened up in the pane, by id. */
 const opened = atom({ plugin: 'trail', key: 'opened' } as const, null)
-/** Whether the band above the prompt shows the whole tree, however long. */
-const expanded = atom({ plugin: 'trail', key: 'expanded' } as const, false)
+/** Which page of the whole tree the band above the prompt shows; 0 is the strip. */
+const page = atom({ plugin: 'trail', key: 'page' } as const, 0)
 /** The nodes whose folded closed branches are shown, by id. */
 const unfolded = atom({ plugin: 'trail', key: 'unfolded' } as const, [])
 
@@ -348,7 +348,7 @@ const forget = async ($: EngineInterface) => {
   await update($, work, () => [])
   await update($, opened, () => null)
   await update($, unfolded, () => [])
-  await update($, expanded, () => false)
+  await update($, page, () => 0)
 }
 
 /** A piece of parallel work started. */
@@ -1362,30 +1362,59 @@ export const register: Register = (on, options) => {
     const pressed = await read($, opened)
     const all = paneRows(held, jobs, now, width, pressed, await read($, unfolded), true)
     const room = roomOf()
-    const isTall = await read($, expanded)
-    // The whole tree when it fits or is asked for; otherwise the strip: what matters most,
-    // one row each, and under it the row that opens the rest.
+    const current = await read($, page)
     const isWhole = all.length <= room
-    const strip = isTall || isWhole ? null : stripRows(held, jobs, now, width, room - 1, pressed)
-    const shown = strip === null ? all : strip.rows
+    const nav: ReturnType<typeof Button>[] = []
+    let shown: PaneRow[]
 
-    const more = strip !== null && (
-      <Button
-        plain
-        dimColor
-        key="more"
-        label={`▾ ${strip.hidden === '' ? 'the whole tree' : strip.hidden}`}
-        onPress={() => update($, expanded, () => true)}
-      />
-    )
-    const fewer = isTall && !isWhole && (
-      <Button plain dimColor key="fewer" label="▴ show fewer" onPress={() => update($, expanded, () => false)} />
-    )
+    // The whole tree when it fits. Otherwise the strip, and from it the whole tree in pages of a fixed
+    // height, so that the box never grows past the band and the engine never scrolls it: no row jumps,
+    // the title stays where it is.
+    if (isWhole) {
+      shown = all
+    } else if (current === 0) {
+      const strip = stripRows(held, jobs, now, width, room - 1, pressed)
 
-    const body = [...drawRows($, e, shown), more, fewer].filter(row => row !== false)
-    // The title row stays in view while the person scrolls inside the box: it is drawn at the
-    // window's first row, and the rows scrolled past stand above it, out of sight.
-    const scrolled = Math.min(Math.max(0, e.props.scroll.offset), body.length)
+      shown = strip.rows
+      nav.push(
+        <Button
+          plain
+          dimColor
+          key="more"
+          label={`▾ ${strip.hidden === '' ? 'the whole tree' : strip.hidden}`}
+          onPress={() => update($, page, () => 1)}
+        />,
+      )
+    } else {
+      // Opened, the box takes what the band allows (the title, the page and this row inside it), a sixth of the screen at least.
+      const per = Math.max(room, e.props.maxRows - 2) - 1
+      const pages = Math.max(1, Math.ceil(all.length / per))
+      const at = Math.min(current, pages)
+
+      shown = all.slice((at - 1) * per, at * per)
+      nav.push(<Button plain dimColor key="fewer" label="▴ show fewer" onPress={() => update($, page, () => 0)} />)
+
+      if (at > 1) {
+        nav.push(<Button plain dimColor key="back" label="◂ back" onPress={() => update($, page, () => at - 1)} />)
+      }
+
+      if (at < pages) {
+        nav.push(
+          <Button plain dimColor key="next" label={`more ▸ ${at}/${pages}`} onPress={() => update($, page, () => at + 1)} />,
+        )
+      }
+    }
+
+    const body = [
+      ...drawRows($, e, shown),
+      ...(nav.length === 0
+        ? []
+        : [
+            <Box columnGap={2}>
+              {nav}
+            </Box>,
+          ]),
+    ]
 
     // Elsewhere than on the terminal the surface draws the frame, with the title as its first row.
     if (wide === undefined) {
@@ -1400,9 +1429,8 @@ export const register: Register = (on, options) => {
 
       return (
         <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
-          {body.slice(0, scrolled)}
           {title}
-          {body.slice(scrolled)}
+          {body}
         </Box>
       )
     }
@@ -1434,9 +1462,8 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
-        {body.slice(0, scrolled).map(sided)}
         {title}
-        {body.slice(scrolled).map(sided)}
+        {body.map(sided)}
         <Box width={wide}>
           <Text dimColor>{`╰${'─'.repeat(wide - 2)}╯`}</Text>
         </Box>
