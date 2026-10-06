@@ -83,6 +83,7 @@ declare module 'claude-code' {
       titles?: string[]
       under?: string
       decide?: string[]
+      settled?: string[]
       outcome?: string
       as?: 'done' | 'dropped' | 'open'
     }

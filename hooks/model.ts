@@ -13,6 +13,9 @@ const LINE = 200
 /** How many nodes left open the note names. */
 const LOOSE_NAMED = 6
 
+/** How many waiting decisions the note names, newest first; the rest are counted. */
+export const DECIDE_NAMED = 8
+
 /** Titles are short enough to read in a narrow pane; longer ones are cut. */
 const TITLE = 80
 
@@ -47,6 +50,10 @@ export const parkedOf = (trail: Trail, target: string) =>
       item.isOpen &&
       (item.id === target.trim() || fold(item.title) === fold(target)),
   )
+
+/** Newest first: by the time parked, and by the sequence when two were parked in the same instant. */
+const newestFirst = (a: TrailParked, b: TrailParked) =>
+  b.at - a.at || Number(b.id.slice(1)) - Number(a.id.slice(1))
 
 const closeParked = (trail: Trail, id: string): Trail => ({
   ...trail,
@@ -196,41 +203,104 @@ export const kindOf = (trail: Trail, target: string): 'step' | 'detour' | null =
   return node.kind === 'detour' ? 'detour' : 'step'
 }
 
+/** What `target` names for an enter or a next: a node, a waiting fork, nothing yet, or more than one node. */
+export type Target =
+  | { node: TrailNode }
+  | { fork: TrailParked }
+  | { fresh: true }
+  | { ambiguous: TrailNode[] }
+
+/**
+ * Resolves the target of an enter or a next: a node by id; else one open node
+ * of the kind by title, a child of the cursor before any other; else a waiting
+ * fork by id or title; else nothing yet. Two open nodes of the title, with no
+ * single one under the cursor, are more than one target: the caller refuses.
+ */
+export const resolveTarget = (trail: Trail, target: string, kind: 'step' | 'detour'): Target => {
+  const byId = nodeOf(trail, target.trim())
+
+  if (byId !== undefined) {
+    return { node: byId }
+  }
+
+  const named = trail.nodes.filter(
+    node => node.kind === kind && node.state === 'open' && fold(node.title) === fold(target),
+  )
+  const close = named.filter(node => node.parentId === trail.cursor)
+  const one = close.length === 1 ? close[0] : close.length === 0 && named.length === 1 ? named[0] : undefined
+
+  if (one !== undefined) {
+    return { node: one }
+  }
+
+  if (named.length > 1) {
+    return { ambiguous: close.length > 1 ? close : named }
+  }
+
+  const fork = parkedOf(trail, target)
+
+  return fork === undefined ? { fresh: true } : { fork }
+}
+
+/**
+ * Where a new node goes: where it is said to ("session", or a task's id); a
+ * detour, or a step inside a detour, under the cursor; a picked-up fork under
+ * its task while that is unfinished; any other new task under the root.
+ */
+const placeOf = (
+  trail: Trail,
+  kind: 'step' | 'detour',
+  under: string | null,
+  picked: TrailParked | undefined,
+): string | null => {
+  const root = trail.nodes.find(node => node.parentId === null)?.id ?? null
+
+  if (under !== null) {
+    return under.toLowerCase() === 'session' ? root : under
+  }
+
+  if (kind === 'detour' || depthOf(trail) > 0) {
+    return trail.cursor
+  }
+
+  const home = picked?.fromId === undefined || picked.fromId === null ? undefined : nodeOf(trail, picked.fromId)
+
+  return home !== undefined && home.kind !== 'goal' && (home.state === 'active' || home.state === 'open')
+    ? home.id
+    : root
+}
+
 /**
  * Moves to the node `target` names by id, or by the title of a planned step
- * or a loose end of that kind; otherwise opens a new node under the cursor.
+ * or a loose end of that kind; otherwise opens a new node where it belongs
+ * (`placeOf`). A target that names more than one node changes nothing: the
+ * caller has refused it.
  */
 export const enter = (
   trail: Trail,
   target: string,
   kind: 'step' | 'detour',
   now: number,
+  under: string | null = null,
 ): Trail => {
   if (trail.cursor === null) {
     return trail
   }
 
-  const named = trail.nodes.filter(
-    node =>
-      node.kind === kind &&
-      node.state === 'open' &&
-      fold(node.title) === fold(target),
-  )
-  const path = new Set(pathOf(trail).map(node => node.id))
-  const waiting =
-    nodeOf(trail, target.trim()) ??
-    named.find(node => node.parentId === trail.cursor) ??
-    named.find(node => node.parentId !== null && path.has(node.parentId)) ??
-    named[0]
+  const found = resolveTarget(trail, target, kind)
 
-  if (waiting !== undefined) {
-    return moveTo(trail, waiting.id, now)
+  if ('ambiguous' in found) {
+    return trail
+  }
+
+  if ('node' in found) {
+    return moveTo(trail, found.node.id, now)
   }
 
   // A parked item picked up becomes the node, and stops waiting.
-  const picked = parkedOf(trail, target)
+  const picked = 'fork' in found ? found.fork : undefined
   const from = picked === undefined ? trail : closeParked(trail, picked.id)
-  const next = add(from, kind, picked?.title ?? target, trail.cursor)
+  const next = add(from, kind, picked?.title ?? target, placeOf(trail, kind, under, picked))
 
   return moveTo(next, `n${next.seq}`, now)
 }
@@ -247,6 +317,7 @@ export const advance = (
   outcome: string | null,
   now: number,
   state: 'done' | 'dropped' | 'open' = 'done',
+  under: string | null = null,
 ): Trail => {
   const here = nodeOf(trail, trail.cursor)
   const how = state === 'done' && outcome === null ? 'open' : state
@@ -254,7 +325,7 @@ export const advance = (
     here === undefined || here.parentId === null
       ? trail
       : leave(trail, how, outcome, now)
-  const entered = enter(left, target, kind, now)
+  const entered = enter(left, target, kind, now, under)
 
   // Leaving a detour for another detour touches the main line only on paper: the counters and the tripwire keep running.
   if (depthOf(trail) > 0 && depthOf(entered) > 0) {
@@ -553,15 +624,34 @@ export const treeText = (trail: Trail, isOpenOnly = false): string => {
 }
 
 /** What the model reads beside each of the person's prompts while the trail is on: the path, then what was left open, then a nudge when the trail looks stale. */
+/**
+ * The decisions still waiting for the person, newest first, with their ids: what
+ * the model reads before it parks a new one, so that the one it replaces is settled.
+ */
+export const decisionsText = (trail: Trail): string => {
+  const waiting = trail.parked.filter(item => item.isOpen && isAsk(item)).sort(newestFirst)
+
+  if (waiting.length === 0) {
+    return ''
+  }
+
+  const named = waiting.slice(0, DECIDE_NAMED).map(item => `[${item.id}] ${item.title}`)
+  const older = waiting.length - named.length
+
+  return `Decisions waiting, settle by id what is taken: ${named.join('; ')}${older > 0 ? ` (+${older} older)` : ''}`
+}
+
 export const noteText = (trail: Trail): string => {
   const loose = trail.nodes
     .filter(isLooseEnd)
     .slice(-LOOSE_NAMED)
     .map(node => `[${node.id}] ${node.title}`)
+  const decisions = decisionsText(trail)
 
   return [
     `[trail] ${pathText(trail)} (${statsText(trail)})`,
     loose.length > 0 && `Left open, continue by id: ${loose.join(', ')}`,
+    decisions !== '' && decisions,
     trail.promptsSinceUpdate >= STALE_AFTER &&
       `The trail has not been updated for ${trail.promptsSinceUpdate} prompts. If the path above is wrong, correct it along with your next tool calls; if it is right, do nothing.`,
   ]
@@ -650,6 +740,131 @@ const wrap = (text: string, width: number): string[] => {
   }
 
   return [...lines, line]
+}
+
+/** Cuts a label so that it fits in `width`, with an ellipsis where it was cut. */
+const fit = (text: string, width: number): string =>
+  text.length <= width ? text : `${text.slice(0, Math.max(1, width - 1)).trimEnd()}…`
+
+/**
+ * The band above the prompt when the whole tree does not fit: the rows that
+ * matter most, one line each, within `room` rows. The task at hand first, then
+ * the decisions waiting, newest first, then the tasks left open, then the forks
+ * only noted; what is left out is counted in `hidden`, for the row that opens
+ * the whole tree. A title is cut to the width; the id and the age always show.
+ */
+export const stripRows = (
+  trail: Trail,
+  work: readonly TrailWork[],
+  now: number,
+  columns: number,
+  room: number,
+  opened: string | null = null,
+): { rows: PaneRow[]; hidden: string } => {
+  const rows: PaneRow[] = []
+  const width = Math.max(NARROWEST, columns)
+  const here = nodeOf(trail, trail.cursor)
+  const line = (
+    mark: string,
+    title: string,
+    tail: string,
+    tone: PaneRow['tone'],
+    fork?: { id: string; title: string },
+  ) => {
+    const lead = `${mark} `
+    // The id must show; the age gives way when the band is too narrow for both.
+    const end = width - lead.length - tail.length < 8 ? tail.replace(/ · [^·]*$/, '') : tail
+    const label = fit(title, Math.max(6, width - lead.length - end.length))
+
+    rows.push({
+      text: `${lead}${label}${end}`,
+      tone,
+      ...(fork !== undefined && { fork: { id: fork.id, title: fork.title, line: 0, at: 0 } }),
+    })
+  }
+  // What an opened fork shows under itself: how it stands, and what can be done with it.
+  const openUp = (fork: { id: string; title: string }, detail: string) => {
+    rows.push({ text: `  ${fit(detail, width - 2)}`, tone: 'dim' })
+    rows.push({ text: '  ', tone: 'plain', act: { id: fork.id, title: fork.title } })
+  }
+  const hasRoom = () => rows.length < room
+
+  if (trail.isTripped) {
+    rows.push({ text: 'LIMIT CROSSED', tone: 'warn' })
+  }
+
+  if (here !== undefined && here.kind !== 'goal') {
+    const since = span(now - (here.startedAt ?? now))
+
+    if (here.kind === 'detour') {
+      line('▸', `detour: ${here.title}`, ` · ${since} · off «${mainOf(trail)?.title ?? ''}»`, 'warn')
+    } else {
+      line('▸', here.title, ` · ${since}`, 'here')
+    }
+  }
+
+  const waiting = trail.parked.filter(item => item.isOpen)
+  const decisions = waiting.filter(isAsk).sort(newestFirst)
+  const noted = waiting.filter(item => !isAsk(item)).sort(newestFirst)
+  const loose = trail.nodes.filter(isLooseEnd).sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))
+  const shown = { decisions: 0, loose: 0, noted: 0 }
+  const leaf = (item: TrailParked, mark: string, tone: PaneRow['tone']) => {
+    const isOpened = item.id === opened
+
+    line(isOpened ? '▾' : mark, item.title, ` [${item.id}] · ${span(now - item.at)}`, tone, item)
+
+    if (isOpened) {
+      const from = item.fromId === null ? undefined : nodeOf(trail, item.fromId)
+
+      openUp(item, `${from === undefined || from.kind === 'goal' ? '' : `from «${from.title}» · `}raised ${span(now - item.at)} ago`)
+    }
+  }
+
+  for (const item of decisions) {
+    if (!hasRoom()) {
+      break
+    }
+
+    leaf(item, '?', 'ask')
+    shown.decisions += 1
+  }
+
+  for (const node of loose) {
+    if (!hasRoom()) {
+      break
+    }
+
+    const isOpened = node.id === opened
+
+    line(isOpened ? '▾' : '◌', node.title, ` (left open) [${node.id}] · ${span(now - (node.startedAt ?? now))}`, 'warn', node)
+
+    if (isOpened) {
+      openUp(node, `${node.outcome === null ? 'left unfinished' : `left unfinished: ${node.outcome}`} · ${span(now - (node.startedAt ?? now))} ago`)
+    }
+
+    shown.loose += 1
+  }
+
+  for (const item of noted) {
+    if (!hasRoom()) {
+      break
+    }
+
+    leaf(item, '·', 'note')
+    shown.noted += 1
+  }
+
+  const left: [number, string, string][] = [
+    [decisions.length - shown.decisions, 'decision', 'decisions'],
+    [loose.length - shown.loose, 'unfinished', 'unfinished'],
+    [noted.length - shown.noted, 'noted', 'noted'],
+  ]
+  const hidden = left
+    .filter(([count]) => count > 0)
+    .map(([count, one, many]) => `${count} more ${count === 1 ? one : many}`)
+    .join(', ')
+
+  return { rows, hidden }
 }
 
 export const runningOf = (work: readonly TrailWork[]) =>

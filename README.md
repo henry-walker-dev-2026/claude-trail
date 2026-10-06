@@ -59,8 +59,12 @@ the conversation.
   groups: **FOR YOU TO DECIDE** and **NOTED, NOT DONE**.
 - The top edge carries the counts of what is still open. What is done is not
   counted.
-- The strip takes about a sixth of the screen. `▾ N more` shows the rest,
-  `▴ show fewer` cuts it back.
+- The strip takes about a sixth of the screen. While the whole tree fits, it is
+  the tree. When it does not, the strip shows what matters most, one row each:
+  the task at hand, then the decisions waiting, newest first, then tasks left
+  open, then forks only noted, each with its id and its age, titles cut to the
+  width. The last row counts what is left out (`▾ 9 more decisions, 71 more
+  noted`) and opens the whole tree; `▴ show fewer` cuts it back.
 
 ## Using it
 
@@ -95,7 +99,26 @@ when it starts one, leaves it when it ends, and parks every fork in the turn it
 raises it, saying whether the fork waits for you. The mod stores what Claude
 reports and draws it; it does not read the conversation and invents nothing.
 The rules reach Claude as hidden context when you type `/trail`, and one hidden
-line rides each of your prompts with the current path.
+note rides your prompts with the current path, the tasks left open and the
+decisions waiting, with their ids, whenever any of that changed.
+
+A new task goes under the root even while another is open: the one left open
+is named in the tool's result and stays in the note until Claude continues it
+by id or closes it. A step that belongs to the task at hand says so (`under`),
+a detour stays with the cursor. A title that names two open nodes is refused
+with both ids rather than guessed.
+
+A fork that a call settles, a decision taken or an offer overtaken, is named by
+id in `settled` on the same `park`, `leave` or `next` and closed in the same
+change. The list is optional for now; `tools/settlement_audit.py` reads a
+transcript and lists, for every call that added a decision, which decision ids
+Claude had been shown before it and which it settled, for the audit that decides
+whether optional is enough.
+
+Background jobs show under the task they were started from. Their ends are
+heard from the engine's notices: a status, a Monitor's expiry, every id a notice
+names. A job started inside an agent that has ended, and a Monitor older than
+the longest watch the engine allows, are marked unknown rather than running.
 
 So the tree is only as true as Claude's reports. In practice it adds and closes
 forks by itself; a step done without being reported stays shown as not started.
@@ -164,10 +187,14 @@ claude --settings /tmp/dev-settings.json
 | `hooks/model.ts` | the tree's logic and the rows of the drawing, without the engine |
 | `types/index.d.ts` | the state the mod keeps |
 | `tests/` | tests of the logic and of the hooks |
-| `tools/` | `digest.py` and `replay.ts`: replay a past session's transcript through the logic, with a model labelling each turn; an estimate, not a measurement |
+| `tools/` | `digest.py` and `replay.ts`: replay a past session's transcript through the logic, with a model labelling each turn; an estimate, not a measurement. `settlement_audit.py`: the settlement pilot's ledger from a transcript |
+| `tests/fixtures/` | a synthetic twin of a real two-day session (same ids, shape, states and title lengths, titles replaced) that the strip is measured on |
 
 ## Not verified
 
-A real compaction, agents and forked agents shown under their task, and the
-tripwire at its default limits have only been tested, not seen in a live
-session.
+Agents and forked agents shown under their task, and the tripwire at its
+default limits, have only been tested, not seen in a live session. Compaction
+has been seen live three times in one session; the tree came back each time.
+Whether an optional `settled` list keeps the decision list true is the open
+question: it is measured with `tools/settlement_audit.py` over a working
+session, and the list becomes required if it does not.

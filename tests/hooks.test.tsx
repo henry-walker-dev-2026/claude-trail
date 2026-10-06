@@ -53,18 +53,46 @@ let logged: string[] = []
 /** How many prompts the person has sent before the test begins. */
 let turns = 0
 
-const spawn = ($: Engine, description: string, more: { fork?: boolean; parentAgentId?: string } = {}) =>
+/** Background shells started in the running test: the first is bash-1, the next bash-2. */
+let shells = 0
+
+/** What the engine lists as this session's agents in the running test. */
+let listed: { id: string; description: string; type: string; status: string }[] = []
+
+const spawn = (
+  $: Engine,
+  description: string,
+  more: { fork?: boolean; parentAgentId?: string; isTeammate?: true } = {},
+) =>
   $.agent.spawn({
     tool_use_id: `call-${description}`,
     prompt: 'do it',
     description,
-    subagentType: 'Explore',
+    subagentType: more.isTeammate === true ? 'teammate' : 'Explore',
     provider: { plugin: 'engine', tier: 'core' },
     parentModel: 'test',
     background: true,
     fork: more.fork ?? false,
     ...(more.parentAgentId !== undefined && { parentAgentId: more.parentAgentId }),
+    ...(more.isTeammate === true && { isTeammate: true as const }),
   })
+
+/** A background job's notice, as the engine writes it into the prompt queue. */
+const notice = ($: Engine, body: string) =>
+  $.prompt.submit({
+    text: `<task-notification>\n${body}\n</task-notification>`,
+    wait: false,
+    origin: { kind: 'task-notification' },
+  })
+
+/** The main conversation's turn ended; an agent's when `agentId` is given. */
+const finish = ($: Engine, agentId?: string) =>
+  $.turn.complete({
+    turnId: `turn-${agentId ?? 'main'}`,
+    answer: 'done',
+    reason: 'answer',
+    ...(agentId !== undefined && { agentId }),
+  } as never)
 
 /** The pane's rows as text: a row is a Text, or a Box holding a fork's mark and its Button, or its actions. */
 const textOf = (node: unknown): string => {
@@ -125,6 +153,8 @@ const boot = async (
   askedRows = []
   draft = ''
   toasted = []
+  shells = 0
+  listed = []
 
   if (kept === undefined) {
     mock.store(on, entries)
@@ -144,7 +174,7 @@ const boot = async (
 
   on('session.id', () => ({ value: 'S1' }))
   on('session.turns', () => ({ value: turns }))
-  on('agent.list', () => ({ value: [] }))
+  on('agent.list', () => ({ value: listed as never }))
   on('agent.spawn', (_, e) => ({ model: 'test', agentId: `agent-${e.description}` }))
   on('ui.open', (_, e) => {
     askedRows.push(e.rows)
@@ -171,7 +201,12 @@ const boot = async (
 
     return { value: undefined }
   })
-  on('tool.call', { tool: 'Bash' }, () => ({ result: { backgroundTaskId: 'bash-1' } as never }))
+  on('tool.call', { tool: 'Bash' }, () => {
+    shells += 1
+
+    return { result: { backgroundTaskId: `bash-${shells}` } as never }
+  })
+  on('tool.call', { tool: 'Monitor' }, () => ({ result: { backgroundTaskId: 'mon-1' } as never }))
   on('tool.call', { tool: 'TaskStop' }, (_, e) => ({
     result: { message: 'stopped', task_id: e.task_id, task_type: 'shell' } as never,
   }))
@@ -1200,21 +1235,22 @@ test('where no pane docks, the tree stands in the band above the prompt, cut to 
   const band = await $.ui.mount(INLINE)
   const press = async (text: RegExp) => band.press({ key: (await band.find({ type: 'Button', text }))?.key ?? '' })
 
-  // 48 rows of screen: eight for the tree, the last of them saying what is left out.
+  // 48 rows of screen: eight for the tree. The whole tree would not fit, so the strip stands
+  // there instead: the forks newest first, one row each, and the last row says what is left out.
   // The first row is the frame's title and the counts, side by side.
   expect(await rowsOf(band)).toEqual([
     'Trail9 forks open',
-    'NOTED, NOT DONE',
-    '├ · Fork one [p2]',
-    '├ · Fork two [p3]',
-    '├ · Fork three [p4]',
-    '├ · Fork four [p5]',
-    '├ · Fork five [p6]',
-    '├ · Fork six [p7]',
-    '▾ 3 more',
+    '· Fork nine [p10] · under 1 min',
+    '· Fork eight [p9] · under 1 min',
+    '· Fork seven [p8] · under 1 min',
+    '· Fork six [p7] · under 1 min',
+    '· Fork five [p6] · under 1 min',
+    '· Fork four [p5] · under 1 min',
+    '· Fork three [p4] · under 1 min',
+    '▾ 2 more noted',
   ])
 
-  await press(/3 more/)
+  await press(/2 more noted/)
 
   expect((await rowsOf(band)).slice(-3)).toEqual(['├ · Fork eight [p9]', '└ · Fork nine [p10]', '▴ show fewer'])
 
@@ -1325,4 +1361,336 @@ test('a job started between tasks is shown while it runs and not after', async (
 
   expect(await paneTexts($)).not.toContain('✓ shell · Wait for the build to end · done after under 1 min')
   expect((await paneTexts($)).some(row => row.includes('Wait for the build'))).toBe(false)
+})
+
+test('a watch ends on the notice that it expired, not on one of its events', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await track($, { action: 'enter', title: 'Review the plan', kind: 'step' })
+  await $.tool.call({
+    tool: 'Monitor',
+    command: 'tail -F review.log | grep --line-buffered done',
+    description: 'Codex review: done',
+    timeout_ms: 1_800_000,
+  })
+
+  const event = (body: string) =>
+    notice($, `<task-id>mon-1</task-id>\n<summary>Monitor event: "Codex review: done"</summary>\n<event>${body}</event>`)
+
+  // An event is news from the watch, not its end: no status rides with it.
+  await event('[codex] Reconnecting')
+
+  expect(await paneTexts($)).toContain('└ ● monitor · Codex review: done · under 1 min')
+
+  await event('[Monitor expired after 30m with 1 event delivered. Re-arm it if you still need the watch.]')
+
+  expect(await paneTexts($)).toContain('└ ✓ monitor · Codex review: done · done after under 1 min')
+})
+
+test('one notice ends every job it names; stopped is an end; the engine\'s markers are not jobs', async ($, on) => {
+  const kept = new Map<string, unknown>()
+
+  await boot($, on, undefined, kept)
+  await command($, '')
+  await track($, { action: 'enter', title: 'Two nights on a copy', kind: 'step' })
+  await $.tool.call({ tool: 'Bash', command: 'night.sh 1', description: 'Night one', run_in_background: true })
+  await $.tool.call({ tool: 'Bash', command: 'night.sh 2', description: 'Night two', run_in_background: true })
+
+  await notice(
+    $,
+    '<task-id>bash-1</task-id>\n<task-id>bash-2</task-id>\n<task-id>__orphan_summary__:shell</task-id>\n<status>stopped</status>\n<summary>2 background shell commands didn\'t finish before the previous session ended</summary>',
+  )
+
+  const rows = await paneTexts($)
+
+  expect(rows).toContain('├ ✗ shell · Night one · stopped after under 1 min')
+  expect(rows).toContain('└ ✗ shell · Night two · stopped after under 1 min')
+  expect((kept.get('work:S1') as { id: string }[]).map(item => item.id)).toEqual(['bash-1', 'bash-2'])
+})
+
+test('an agent that ends takes the jobs it started into the unknown; a late notice still lands', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await track($, { action: 'enter', title: 'Run the pilot', kind: 'step' })
+  await spawn($, 'pilot')
+  await $.tool.call({
+    tool: 'Bash',
+    command: 'judge.sh 1',
+    description: 'Judge batch one',
+    run_in_background: true,
+    ...({ agentId: 'agent-pilot' } as object),
+  })
+
+  expect((await paneTexts($)).some(row => row.includes('● shell · Judge batch one · under 1 min'))).toBe(true)
+
+  // The shell's end was told to the agent; the agent is gone, so nobody here will hear it.
+  await finish($, 'agent-pilot')
+
+  const rows = await paneTexts($)
+
+  expect(rows.some(row => row.includes('✓ agent · Explore: pilot · done after under 1 min'))).toBe(true)
+  expect(rows.some(row => row.includes('? shell · Judge batch one · unknown'))).toBe(true)
+
+  // Should the notice reach the main conversation after all, it is the truth and replaces the guess.
+  await notice($, '<task-id>bash-1</task-id>\n<status>completed</status>')
+
+  expect((await paneTexts($)).some(row => row.includes('✓ shell · Judge batch one · done after under 1 min'))).toBe(true)
+})
+
+test('a teammate that answered only waits, and what it started keeps running', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await track($, { action: 'enter', title: 'Judge the pairs', kind: 'step' })
+  await spawn($, 'batch', { isTeammate: true })
+  await $.tool.call({
+    tool: 'Bash',
+    command: 'judge.sh',
+    description: 'Judge batch two',
+    run_in_background: true,
+    ...({ agentId: 'agent-batch' } as object),
+  })
+  await finish($, 'agent-batch')
+
+  const rows = await paneTexts($)
+
+  expect(rows.some(row => row.includes('◌ teammate · teammate: batch · idle after under 1 min'))).toBe(true)
+  expect(rows.some(row => row.includes('● shell · Judge batch two · under 1 min'))).toBe(true)
+})
+
+test('a watch that ran past the longest allowed is unknown once the turn ends', async ($, on) => {
+  const clock = await boot($, on)
+
+  await command($, '')
+  await track($, { action: 'enter', title: 'Wait for the night', kind: 'step' })
+  await $.tool.call({ tool: 'Monitor', command: 'tail -F night.log', description: 'Night: phases and failures', timeout_ms: 1_800_000 })
+  await clock.advance(31 * MINUTE)
+
+  expect(await paneTexts($)).toContain('└ ● monitor · Night: phases and failures · 31 min')
+
+  await finish($)
+
+  expect(await paneTexts($)).toContain('└ ? monitor · Night: phases and failures · unknown')
+})
+
+test('an agent the engine still lists as ended is not live: what it started goes unknown at the turn\'s end', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await track($, { action: 'enter', title: 'Run the pilot', kind: 'step' })
+  await spawn($, 'pilot')
+  await spawn($, 'scout')
+  await $.tool.call({
+    tool: 'Bash',
+    command: 'judge.sh 1',
+    description: 'Judge batch one',
+    run_in_background: true,
+    ...({ agentId: 'agent-pilot' } as object),
+  })
+  await $.tool.call({
+    tool: 'Bash',
+    command: 'scan.sh',
+    description: 'Scan the goods',
+    run_in_background: true,
+    ...({ agentId: 'agent-scout' } as object),
+  })
+
+  // The pilot's end was never heard here, but the engine's list says it: completed. The scout still runs.
+  listed = [
+    { id: 'agent-pilot', description: 'pilot', type: 'Explore', status: 'completed' },
+    { id: 'agent-scout', description: 'scout', type: 'Explore', status: 'running' },
+  ]
+  await finish($)
+
+  const rows = await paneTexts($)
+
+  expect(rows.some(row => row.includes('? agent · Explore: pilot · unknown'))).toBe(true)
+  expect(rows.some(row => row.includes('? shell · Judge batch one · unknown'))).toBe(true)
+  expect(rows.some(row => row.includes('● agent · Explore: scout · under 1 min'))).toBe(true)
+  expect(rows.some(row => row.includes('● shell · Scan the goods · under 1 min'))).toBe(true)
+})
+
+/** The id of the one fork a park result names. */
+const parkedId = (result: string) => /\[(p\d+)\]/.exec(result)?.[1] ?? ''
+
+test('a call that closes a task also settles the forks it names, and says which were not waiting', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await track($, { action: 'enter', title: 'Push the pair', kind: 'step' })
+
+  const id = parkedId(await track($, { action: 'park', decide: ['Say the word: push the pair'] }))
+  const out = await track($, { action: 'leave', outcome: 'pair pushed', settled: [id, 'p99'] })
+
+  expect(out).toContain(`Settled: [${id}] Say the word: push the pair`)
+  expect(out).toContain('Not waiting, skipped: p99')
+  expect(await track($, { action: 'show' })).not.toContain('Say the word')
+})
+
+test('"settled" refuses a malformed list and leaves the trail as it was', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await track($, { action: 'enter', title: 'Push the pair', kind: 'step' })
+
+  const id = parkedId(await track($, { action: 'park', decide: ['Say the word: push the pair'] }))
+
+  expect(await track($, { action: 'leave', outcome: 'pushed', settled: id })).toContain('takes a list of fork ids')
+  expect(await track($, { action: 'unpark', title: id, settled: [id] })).toContain('goes with park, leave or next')
+  expect(await track($, { action: 'confirm' })).toContain('Session › Push the pair')
+  expect(await track($, { action: 'show' })).toContain('Say the word: push the pair')
+})
+
+test('a fork cannot be settled and filed in one call', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await track($, { action: 'enter', title: 'Push the pair', kind: 'step' })
+
+  const id = parkedId(await track($, { action: 'park', decide: ['Push the pair now'] }))
+
+  expect(await track($, { action: 'park', settled: [id], decide: ['Push the pair now'] })).toContain(
+    'is both settled and filed in this call',
+  )
+  expect(await track($, { action: 'next', title: id, settled: [id] })).toContain('is both settled and filed in this call')
+  expect(await track($, { action: 'show' })).toContain('Push the pair now')
+})
+
+test('the note lists the decisions waiting, newest first, and comes again when they change', async ($, on) => {
+  const clock = await boot($, on)
+
+  await command($, '')
+  await track($, { action: 'enter', title: 'Build the index', kind: 'step' })
+  await track($, { action: 'park', decide: ['Rebuild from nothing, yes or no'] })
+
+  expect(await prompt($)).toContain(
+    'Decisions waiting, settle by id what is taken: [p3] Rebuild from nothing, yes or no',
+  )
+  expect(await prompt($)).toBe('')
+
+  await clock.advance(MINUTE)
+  await track($, { action: 'park', decide: ['Keep the old index around'] })
+
+  expect(await prompt($)).toContain('[p4] Keep the old index around; [p3] Rebuild from nothing, yes or no')
+})
+
+test('a call that adds a decision answers with the other decisions waiting', async ($, on) => {
+  const clock = await boot($, on)
+
+  await command($, '')
+  await track($, { action: 'enter', title: 'Build the index', kind: 'step' })
+
+  // The first decision has none before it to replace: nothing is named.
+  expect(await track($, { action: 'park', decide: ['Rebuild from nothing, yes or no'] })).not.toContain(
+    'Decisions waiting',
+  )
+
+  await clock.advance(MINUTE)
+
+  const out = await track($, { action: 'leave', outcome: 'index built', decide: ['Keep the old index around'] })
+
+  expect(out).toContain('Decisions waiting, settle by id what is taken: [p3] Rebuild from nothing, yes or no\n')
+  // A plain closing names nothing of the kind.
+  expect(await track($, { action: 'enter', title: 'Ship it', kind: 'step' })).not.toContain('Decisions waiting')
+})
+
+test('a new task goes under the root while another is open, and the one left open is named', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await track($, { action: 'enter', title: 'Synonym builder loop', kind: 'step' })
+
+  const out = await track($, { action: 'enter', title: 'Four unify commits: decide', kind: 'step' })
+
+  expect(out).toContain('Session › Four unify commits: decide')
+  expect(out).toContain('Left open: [n2] Synonym builder loop. Continue it by id')
+  expect(await track($, { action: 'show' })).toContain('Synonym builder loop [n2] (left open)')
+  // Back to it by id: nothing was lost.
+  expect(await track($, { action: 'enter', title: 'n2' })).toContain('Session › Synonym builder loop')
+})
+
+test('a step of the task at hand is placed there with "under"; a detour and a step inside it stay with the cursor', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await track($, { action: 'enter', title: 'Builder loop', kind: 'step' })
+
+  expect(await track($, { action: 'enter', title: 'Score the builder', kind: 'step', under: 'n2' })).toContain(
+    'Session › Builder loop › Score the builder',
+  )
+  expect(await track($, { action: 'enter', title: 'DB down', kind: 'detour' })).toContain(
+    'Session › Builder loop › Score the builder › DB down',
+  )
+  expect(await track($, { action: 'enter', title: 'Restart the DB', kind: 'step' })).toContain(
+    'Session › Builder loop › Score the builder › DB down › Restart the DB',
+  )
+})
+
+test('a title that names two open nodes is refused with their ids; a child of the task at hand is taken first', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await track($, { action: 'enter', title: 'A', kind: 'step' })
+  await track($, { action: 'plan', steps: ['tests'] })
+  await track($, { action: 'enter', title: 'B', kind: 'step' })
+  await track($, { action: 'plan', steps: ['tests'] })
+
+  // Under B, "tests" is B's planned step.
+  expect(await track($, { action: 'enter', title: 'tests' })).toContain('Session › B › tests')
+
+  await track($, { action: 'leave', as: 'open' })
+  await track($, { action: 'leave', as: 'open' })
+
+  // At the root both are open and neither is nearer: no guess.
+  expect(await track($, { action: 'enter', title: 'tests' })).toContain(
+    '«tests» names 2 open nodes: [n3] under n2, [n5] under n4. Enter one by its id.',
+  )
+  expect(await track($, { action: 'enter', title: 'n3' })).toContain('Session › A › tests')
+})
+
+test('next resolves its target before it commits: an ambiguous target leaves the task as it was', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await track($, { action: 'enter', title: 'A', kind: 'step' })
+  await track($, { action: 'plan', steps: ['tests'] })
+  await track($, { action: 'enter', title: 'B', kind: 'step' })
+  await track($, { action: 'plan', steps: ['tests'] })
+
+  expect(await track($, { action: 'next', title: 'tests', outcome: 'planned' })).toContain('names 2 open nodes')
+  // B is still the task at hand, not closed by the refused call.
+  expect(await track($, { action: 'confirm' })).toContain('Session › B')
+  expect(await track($, { action: 'show' })).not.toContain('planned')
+})
+
+test('a picked-up fork becomes a task under its home while that is unfinished, else under the root', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await track($, { action: 'enter', title: 'A', kind: 'step' })
+
+  const inA = parkedId(await track($, { action: 'park', title: 'Check the index' }))
+
+  await track($, { action: 'leave', as: 'open' })
+
+  expect(await track($, { action: 'enter', title: inA })).toContain('Session › A › Check the index')
+
+  await track($, { action: 'leave', outcome: 'checked' })
+  await track($, { action: 'leave', outcome: 'done with A' })
+  await track($, { action: 'enter', title: 'C', kind: 'step' })
+
+  const inC = parkedId(await track($, { action: 'park', title: 'Later thing' }))
+
+  await track($, { action: 'leave', outcome: 'done with C' })
+
+  // C is finished: its fork, picked up, is a task of its own.
+  expect(await track($, { action: 'enter', title: inC })).toContain('Session › Later thing')
+})
+
+test('"under" must name a task not finished, and a node that exists keeps its place', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await track($, { action: 'enter', title: 'A', kind: 'step' })
+
+  expect(await track($, { action: 'enter', title: 'X', kind: 'step', under: 'n99' })).toContain('no open task «n99»')
+
+  await track($, { action: 'leave', outcome: 'done' })
+
+  expect(await track($, { action: 'enter', title: 'Y', kind: 'step', under: 'n2' })).toContain('no open task «n2»')
+
+  await track($, { action: 'enter', title: 'B', kind: 'step' })
+  await track($, { action: 'enter', title: 'C', kind: 'step', under: 'n3' })
+
+  expect(await track($, { action: 'enter', title: 'n4', under: 'session' })).toContain('already has its place')
+  expect(await track($, { action: 'confirm' })).toContain('Session › B › C')
 })

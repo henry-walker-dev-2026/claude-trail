@@ -5,6 +5,7 @@ import {
   addSteps,
   advance,
   confirm,
+  decisionsText,
   depthOf,
   enter,
   fix,
@@ -16,6 +17,7 @@ import {
   prompted,
   setGoal,
   statsText,
+  stripRows,
   tick,
   tidy,
   treeText,
@@ -24,6 +26,7 @@ import {
   unpark,
 } from '../hooks/model'
 import type { Trail, TrailWork } from '../types'
+import { fixture } from './fixtures/strip-tree'
 
 const LIMITS = { depth: 2, minutes: 30, prompts: 5 }
 
@@ -443,6 +446,24 @@ describe('tasks under a session', () => {
   })
 })
 
+describe('the decisions waiting', () => {
+  test('the note names them newest first with their ids and folds the older ones; noted forks stay out', () => {
+    const session = setGoal(EMPTY, 'Session', 0)
+    const ten = Array.from({ length: 10 }).reduce<Trail>(
+      (held, _, index) => park(held, `Decision ${index + 1}`, index + 1, null, true),
+      session,
+    )
+    const noted = park(ten, 'Only noted', 20)
+    const note = noteText(noted)
+
+    expect(note).toContain('Decisions waiting, settle by id what is taken: [p11] Decision 10; [p10] Decision 9')
+    expect(note).toContain('[p4] Decision 3 (+2 older)')
+    expect(note).not.toContain('Only noted')
+    expect(decisionsText(unpark(noted, 'p11'))).toContain('[p10] Decision 9; [p9] Decision 8')
+    expect(decisionsText(session)).toBe('')
+  })
+})
+
 describe('the path note', () => {
   test('is one line: the path and the counts', () => {
     expect(noteText(enter(started(), 'token endpoint', 'step', 1))).toBe(
@@ -456,5 +477,71 @@ describe('the path note', () => {
     expect(noteText(stale)).toContain('has not been updated for 3 prompts')
     expect(statsText(stale)).toContain('not updated for 3 prompts')
     expect(noteText(confirm(stale))).not.toContain('has not been updated')
+  })
+})
+
+describe('the strip above the prompt', () => {
+  // The fixture is a two-day session: 81 nodes, 95 open forks of which 16 wait for a decision, one task left open.
+  const NOW = Math.max(...fixture.trail.parked.map(item => item.at)) + 5 * 60_000
+
+  test('shows the task at hand, then the decisions newest first, one row each within the room', () => {
+    const { rows, hidden } = stripRows(fixture.trail, fixture.work, NOW, 116, 7)
+
+    expect(rows.length).toBe(7)
+    expect(rows[0]?.text.startsWith('▸ Task 251 ')).toBe(true)
+    expect(rows[0]?.tone).toBe('here')
+    expect(rows[1]?.text.startsWith('? Decision 250 ')).toBe(true)
+    expect(rows[1]?.text).toContain('[p250] · 5 min')
+    expect(rows[1]?.fork).toEqual({ id: 'p250', title: fixture.trail.parked.find(item => item.id === 'p250')?.title, line: 0, at: 0 })
+    expect(rows[2]?.text).toContain('[p235]')
+    expect(rows.every(row => row.text.length <= 116)).toBe(true)
+    expect(hidden).toBe('10 more decisions, 1 more unfinished, 79 more noted')
+  })
+
+  test('cuts titles to the width and keeps the id and the age', () => {
+    const { rows } = stripRows(fixture.trail, fixture.work, NOW, 40, 7)
+
+    expect(rows.every(row => row.text.length <= 40)).toBe(true)
+    expect(rows[1]?.text).toMatch(/^\? Decision 250 .*… \[p250\] · 5 min$/)
+    expect(rows[0]?.text).toMatch(/^▸ Task 251 .*… · /)
+  })
+
+  test('in a narrow band the age gives way before the id does', () => {
+    const { rows } = stripRows(fixture.trail, fixture.work, NOW, 24, 7)
+
+    expect(rows[1]?.text).toMatch(/^\? Decis.*… \[p250\]$/)
+    expect(rows.every(row => row.text.length <= 24)).toBe(true)
+  })
+
+  test('with little room the strip is the task and the newest decisions, and the rest is counted', () => {
+    const { rows, hidden } = stripRows(fixture.trail, fixture.work, NOW, 116, 3)
+
+    expect(rows.map(row => row.text.slice(0, 1))).toEqual(['▸', '?', '?'])
+    expect(hidden).toBe('14 more decisions, 1 more unfinished, 79 more noted')
+  })
+
+  test('a pressed fork opens up in the strip too: where it came from, take up and drop', () => {
+    const { rows } = stripRows(fixture.trail, fixture.work, NOW, 116, 7, 'p250')
+
+    expect(rows[1]?.text.startsWith('▾ Decision 250 ')).toBe(true)
+    expect(rows[2]?.text).toMatch(/^ {2}(from «.*» · )?raised 5 min ago$/)
+    expect(rows[3]?.act).toEqual({ id: 'p250', title: fixture.trail.parked.find(item => item.id === 'p250')?.title })
+  })
+
+  test('once the decisions are shown the tasks left open come, then the forks only noted', () => {
+    const { rows, hidden } = stripRows(fixture.trail, fixture.work, NOW, 116, 19)
+
+    expect(rows[17]?.text).toMatch(/^◌ Task 187 .* \(left open\) \[n187\] · /)
+    expect(rows[18]?.text.startsWith('· Fork 249 ')).toBe(true)
+    expect(hidden).toBe('78 more noted')
+  })
+
+  test('between tasks there is no task row, and a fork of the session fills it', () => {
+    const session = setGoal(EMPTY, 'Session', 0)
+    const three = park(park(park(session, 'Fork one', 1), 'Fork two', 2), 'Fork three', 3)
+    const { rows, hidden } = stripRows(three, [], 4 * 60_000, 60, 2)
+
+    expect(rows.map(row => row.text)).toEqual(['· Fork three [p4] · 3 min', '· Fork two [p3] · 3 min'])
+    expect(hidden).toBe('1 more noted')
   })
 })

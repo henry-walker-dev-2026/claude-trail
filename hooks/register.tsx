@@ -2,19 +2,19 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ResolveInput } from 'claude-code'
 
 import {
-  EMPTY,
-  TOOL,
   addSteps,
   advance,
   confirm,
   countsText,
+  decisionsText,
   depthOf,
   dropFork,
+  EMPTY,
   enter,
-  forksText,
-  kindOf,
   fix,
+  forksText,
   fullText,
+  kindOf,
   leave,
   markAsk,
   moveFork,
@@ -25,12 +25,15 @@ import {
   pathOf,
   pathText,
   prompted,
+  resolveTarget,
   runningOf,
-  STALE_AFTER,
   setGoal,
+  STALE_AFTER,
   statsText,
-  tidy,
+  stripRows,
   tick,
+  tidy,
+  TOOL,
   treeText,
   tripOf,
   tripText,
@@ -65,10 +68,14 @@ const BACKGROUND: Record<string, TrailWork['kind']> = {
 /** The kinds of parallel work that are agent loops the engine lists. */
 const AGENTS = new Set<TrailWork['kind']>(['agent', 'fork', 'teammate'])
 
+/** The longest a Monitor watches before the engine ends it: one "running" longer than this has expired unheard. */
+const MONITOR_CAP = 30 * 60_000
+
 const ENDED: Record<string, TrailWorkState> = {
   completed: 'done',
   failed: 'failed',
   killed: 'stopped',
+  stopped: 'stopped',
 }
 
 /** Theme keys, so the pane follows the person's theme. */
@@ -143,7 +150,7 @@ const USAGE = `# Trail
 The person turned on a mod named trail. It paints this session as a tree in a side pane, so that nothing they asked for gets lost and side tracks stay visible. You keep the tree true through the ${TOOL} tool. Only the main conversation does; a subagent never calls it.
 
 - The root is the session; it already exists.
-- A task is one piece of work the person asks for: a change, a run, a review, a question that needs real work. action "enter", kind "step", before you start on it. Tasks sit directly under the root, so close the current task before entering the next.
+- A task is one piece of work the person asks for: a change, a run, a review, a question that needs real work. action "enter", kind "step", before you start on it. A new task goes under the root even while another is open: the one still open is left open, named in the result, and continued later by its id or closed with "leave". A step that belongs to the task at hand says so: "under" with that task's id.
 - action "leave" when the current task ends: as "done" with a one-line outcome, as "open" if it is not finished (interrupted, waiting on something, an answer still pending), as "dropped" if it is given up. action "next" does both in one call: it closes the current node and enters the one named in "title". Give the outcome if the current node is finished; without an outcome it is left open.
 - To continue something that was left open, enter it by its id. Never open a second node for the same work.
 - A task of several steps: action "plan" lists them under the task; enter and leave them like tasks.
@@ -155,6 +162,7 @@ The person turned on a mod named trail. It paints this session as a tree in a si
 - Park a fork once; when it comes up again it is already on the list. When the person takes it up, enter it by its id.
 - When the person asks what is open, or refers to a task or a fork by its id ("do p20", "drop p16"), action "show" returns the whole tree with every id. Answer from that, not from memory, and name each item with its id. A prompt that only names a fork, without saying what to do with it, is a question about it: say what it is and what the choices are, and do not start on it.
 - The list is only worth reading while it is true, so close forks as carefully as you park them. Whenever a task ends, the result lists the open forks: action "unpark" ("titles" takes several ids) for each one that was settled, decided or overtaken. A fork that changed shape is replaced: unpark the old wording when you park the new one.
+- A fork that a call settles, a decision taken or an offer overtaken, goes by id in "settled" on that park, leave or next: it is closed in the same change, no separate unpark. The note before each prompt lists the decisions waiting with their ids; before you park a new decision, settle the one it replaces.
 - action "fix": correct the current node's title or kind. action "goal": give the root a better name, six words at most, when the session is about one big thing.
 
 Titles are read in a narrow side pane: six words at most, plain words, no file paths, no trailing detail.
@@ -228,7 +236,13 @@ const TOOL_SCHEMA = {
     under: {
       type: 'string',
       description:
-        'park: where the forks belong when that is not the task at hand: "session", or the id of a task. Given with the id of a fork already parked, it moves that fork there.',
+        'park: where the forks belong when that is not the task at hand: "session", or the id of a task. Given with the id of a fork already parked, it moves that fork there. enter, next: where a new node goes when not under the root: the id of the task it is a step of.',
+    },
+    settled: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'park, leave, next: the ids of waiting forks this call settles (a decision taken, an offer overtaken); they are closed in the same change. The note before each prompt lists the decisions waiting.',
     },
     outcome: {
       type: 'string',
@@ -345,7 +359,7 @@ const started = async ($: EngineInterface, item: TrailWork) => {
   await save($)
 }
 
-/** A piece of parallel work ended, if it was still known as going. */
+/** A piece of parallel work ended, if it was still known as going, or its end had gone unheard. */
 const ended = async (
   $: EngineInterface,
   id: string,
@@ -355,11 +369,61 @@ const ended = async (
   if ((await read($, work)).some(item => item.id === id)) {
     await update($, work, list =>
       list.map(item =>
-        item.id === id && (item.state === 'running' || item.state === 'idle')
+        item.id === id && (item.state === 'running' || item.state === 'idle' || item.state === 'unknown')
           ? { ...item, state: how(item), endedAt: now }
           : item,
       ),
     )
+    await save($)
+  }
+}
+
+/** An agent is gone for good: what it started and never saw end goes unknown, since those ends were told to it, never here. */
+const orphan = async ($: EngineInterface, parentId: string) => {
+  const held = await read($, work)
+
+  if (held.some(item => item.parentId === parentId && item.state === 'running')) {
+    await update($, work, list =>
+      list.map(item =>
+        item.parentId === parentId && item.state === 'running' ? { ...item, state: 'unknown' as const } : item,
+      ),
+    )
+    await save($)
+  }
+}
+
+/**
+ * The pane never says "running" of what it cannot know to run: an agent the
+ * engine no longer lists, a job started inside such an agent, a shell of an
+ * earlier process, a job whose task was given up and whose end went unheard,
+ * a Monitor older than the longest watch the engine allows.
+ */
+const reconcile = async ($: EngineInterface, isNewProcess: boolean) => {
+  const held = await read($, work)
+
+  if (!held.some(item => item.state === 'running')) {
+    return
+  }
+
+  // The engine keeps listing an agent after its end, with that end as its status: only one not ended is live.
+  const live = new Set(
+    (await $.agent.list())
+      .filter(agent => agent.status !== 'completed' && agent.status !== 'failed' && agent.status !== 'killed')
+      .map(agent => agent.id),
+  )
+  const givenUp = new Set((await read($, trail)).nodes.filter(node => node.state === 'dropped').map(node => node.id))
+  const now = await $.clock.now()
+  const isLost = (item: TrailWork) =>
+    AGENTS.has(item.kind)
+      ? !live.has(item.id)
+      : isNewProcess ||
+        (item.nodeId !== null && givenUp.has(item.nodeId)) ||
+        (item.parentId !== null && !live.has(item.parentId)) ||
+        (item.kind === 'monitor' && now - item.startedAt > MONITOR_CAP)
+  const seen = held.map(item => (item.state === 'running' && isLost(item) ? { ...item, state: 'unknown' as const } : item))
+
+  if (seen.some((item, index) => item !== held[index])) {
+    await update($, work, () => seen)
     await save($)
   }
 }
@@ -584,25 +648,7 @@ export const register: Register = (on, options) => {
       }
     }
 
-    if ((await read($, work)).some(item => item.state === 'running')) {
-      // The pane never says "running" of what it cannot know to run: an agent the
-      // engine no longer lists, a shell of an earlier process, a job whose task
-      // was given up and whose end went unheard.
-      const live = new Set((await $.agent.list()).map(agent => agent.id))
-      const givenUp = new Set(held.nodes.filter(node => node.state === 'dropped').map(node => node.id))
-
-      await update($, work, list =>
-        list.map(item =>
-          item.state === 'running' &&
-          (AGENTS.has(item.kind)
-            ? !live.has(item.id)
-            : isNewProcess || (item.nodeId !== null && givenUp.has(item.nodeId)))
-            ? { ...item, state: 'unknown' as const }
-            : item,
-        ),
-      )
-      await save($)
-    }
+    await reconcile($, isNewProcess)
 
     if (hasTrail) {
       await wake($)
@@ -653,17 +699,27 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       isWorking = false
+
+      // The end of a turn is when the pane looks again at what it still calls running.
+      if (hasTrail) {
+        await reconcile($, false)
+      }
     } else if (hasTrail) {
       const state: TrailWorkState =
         e.reason === 'answer' ? 'done' : e.reason === 'aborted' ? 'stopped' : 'failed'
+      const agentId = e.agentId
 
       // A teammate that answered waits for its next message; it is not finished.
       await ended(
         $,
-        e.agentId,
+        agentId,
         item => (item.kind === 'teammate' && state === 'done' ? 'idle' : state),
         await $.clock.now(),
       )
+
+      if ((await read($, work)).some(item => item.id === agentId && item.state !== 'idle')) {
+        await orphan($, agentId)
+      }
     }
 
     return next(e)
@@ -720,12 +776,24 @@ export const register: Register = (on, options) => {
 
     // A background task says how it ended; anything else it says changes nothing.
     if (e.origin.kind === 'task-notification') {
-      const id = /<task-id>([^<]+)<\/task-id>/.exec(e.text)?.[1]?.trim()
+      // One notice can name several tasks (the ones an earlier process left); the engine's own markers are not tasks.
+      const ids = [...e.text.matchAll(/<task-id>([^<]+)<\/task-id>/g)]
+        .map(match => (match[1] ?? '').trim())
+        .filter(id => id !== '' && !id.startsWith('__'))
       const status = (/<status>([^<]+)<\/status>/.exec(e.text)?.[1] ?? '').trim()
-      const state = Object.hasOwn(ENDED, status) ? ENDED[status] : undefined
+      // A Monitor sends no status: its events keep it going, and its end is the one event that says it expired.
+      const state: TrailWorkState | undefined = Object.hasOwn(ENDED, status)
+        ? ENDED[status]
+        : /<event>\s*\[Monitor expired/.test(e.text)
+          ? 'done'
+          : undefined
 
-      if (id !== undefined && state !== undefined) {
-        await ended($, id, () => state, await $.clock.now())
+      if (state !== undefined) {
+        const now = await $.clock.now()
+
+        for (const id of ids) {
+          await ended($, id, () => state, now)
+        }
       }
     }
 
@@ -748,7 +816,10 @@ export const register: Register = (on, options) => {
     // The note rides a prompt only when it says something new: the path or what is left open
     // changed, or the trail has gone unreported for a while. Said again it would only cost.
     const note = noteText(held)
-    const told = [pathText(held), ...note.split('\n').filter(line => line.startsWith('Left open'))].join('\n')
+    const told = [
+      pathText(held),
+      ...note.split('\n').filter(line => line.startsWith('Left open') || line.startsWith('Decisions waiting')),
+    ].join('\n')
     const isStale =
       held.promptsSinceUpdate === STALE_AFTER ||
       (held.promptsSinceUpdate > STALE_AFTER && held.promptsSinceUpdate % 5 === 0)
@@ -870,7 +941,64 @@ export const register: Register = (on, options) => {
       .filter(one => one !== '')
     const named = [...(title === '' ? [] : [title]), ...listed]
     // The node a leave or a next closes: what it settled or left behind is said in the same call.
-    const closing = (await read($, trail)).cursor
+    const before = await read($, trail)
+    const closing = before.cursor
+
+    // "settled": waiting forks this call closes, by id, in the same change as the rest of it.
+    if (e.settled !== undefined && !(Array.isArray(e.settled) && e.settled.every(one => typeof one === 'string'))) {
+      return { deny: 'trail: "settled" takes a list of fork ids.' }
+    }
+
+    const settledIds = [
+      ...new Set((Array.isArray(e.settled) ? (e.settled as string[]) : []).map(one => one.trim()).filter(one => one !== '')),
+    ]
+
+    if (settledIds.length > 0 && !['park', 'leave', 'next'].includes(action)) {
+      return { deny: 'trail: "settled" goes with park, leave or next.' }
+    }
+
+    // Only a fork that waits now can be settled; an id that names none is skipped and said so.
+    const settling = settledIds.flatMap(id => {
+      const item = before.parked.find(one => one.isOpen && one.id === id)
+
+      return item === undefined ? [] : [item]
+    })
+    const skipped = settledIds.filter(id => !settling.some(item => item.id === id))
+    const filing = [...named, ...asks, ...(action === 'next' ? [title] : [])]
+    const clash = settling.find(item => filing.some(one => parkedOf(before, one)?.id === item.id))
+
+    if (clash !== undefined) {
+      return { deny: `trail: «${clash.id}» is both settled and filed in this call; do one or the other.` }
+    }
+
+    const settleAll = (held: Trail): Trail => settling.reduce((kept, item) => unpark(kept, item.id), held)
+    const under = typeof e.under === 'string' ? e.under.trim() : ''
+    const rootId = before.nodes.find(node => node.parentId === null)?.id ?? null
+    // enter, next: a new node goes where "under" says, "session" or a task not finished; anywhere else is no place.
+    const placeId =
+      under === '' ? null : under.toLowerCase() === 'session' ? rootId : before.nodes.find(node => node.id === under)?.id ?? null
+    const placeState = placeId === null ? undefined : before.nodes.find(node => node.id === placeId)?.state
+
+    if (['enter', 'next'].includes(action) && under !== '' && (placeId === null || placeState === 'done' || placeState === 'dropped')) {
+      return { deny: `trail: no open task «${under}» to put this under. Use an id from action "show", or "session".` }
+    }
+
+    // What an enter or a next will land on, checked before anything changes: more than one node is no target.
+    const aimed = (held: Trail, known: 'step' | 'detour'): { deny: string } | null => {
+      const found = resolveTarget(held, title, known)
+
+      if ('ambiguous' in found) {
+        return {
+          deny: `trail: «${title}» names ${found.ambiguous.length} open nodes: ${found.ambiguous.map(node => `[${node.id}] under ${node.parentId ?? 'the root'}`).join(', ')}. Enter one by its id.`,
+        }
+      }
+
+      if ('node' in found && under !== '' && found.node.parentId !== placeId) {
+        return { deny: `trail: «${found.node.id}» already has its place; enter it without "under".` }
+      }
+
+      return null
+    }
 
     if (['goal', 'enter', 'next'].includes(action) && title === '') {
       return { deny: `trail: action "${action}" needs a title.` }
@@ -894,21 +1022,42 @@ export const register: Register = (on, options) => {
       }
       case 'enter': {
         // Only a new node needs its kind said; going back to one that exists does not.
-        const known = kind ?? kindOf(await read($, trail), title)
+        const known = kind ?? kindOf(before, title)
 
         if (known === null) {
           return { deny: 'trail: action "enter" needs kind "step" or "detour" for a new node.' }
         }
 
-        held = await change($, one => enter(one, title, known, now))
+        const refused = aimed(before, known)
+
+        if (refused !== null) {
+          return refused
+        }
+
+        held = await change($, one => enter(one, title, known, now, under === '' ? null : under))
         break
       }
       case 'next': {
         const outcome = typeof e.outcome === 'string' && e.outcome.trim() !== '' ? e.outcome : null
         const as = e.as === 'done' || e.as === 'dropped' || e.as === 'open' ? e.as : undefined
+        // The target is resolved on the tree as it stands after the leave, and nothing is committed if that fails.
+        const how = (as ?? 'done') === 'done' && outcome === null ? 'open' : (as ?? 'done')
+        const here = before.nodes.find(node => node.id === before.cursor)
+        const after = here === undefined || here.parentId === null ? settleAll(before) : leave(settleAll(before), how, outcome, now)
+        const refused = aimed(after, kind ?? 'step')
+
+        if (refused !== null) {
+          return refused
+        }
 
         held = await change($, one =>
-          withForks(advance(one, title, kind ?? 'step', outcome, now, as), closing, listed, asks, now),
+          withForks(
+            advance(settleAll(one), title, kind ?? 'step', outcome, now, as, under === '' ? null : under),
+            closing,
+            listed,
+            asks,
+            now,
+          ),
         )
         break
       }
@@ -916,7 +1065,7 @@ export const register: Register = (on, options) => {
         const as = e.as === 'dropped' || e.as === 'open' ? e.as : 'done'
         const outcome = typeof e.outcome === 'string' ? e.outcome : null
 
-        held = await change($, one => withForks(leave(one, as, outcome, now), closing, listed, asks, now))
+        held = await change($, one => withForks(leave(settleAll(one), as, outcome, now), closing, listed, asks, now))
         justLeft = closing
         break
       }
@@ -926,7 +1075,6 @@ export const register: Register = (on, options) => {
         }
 
         const at = await read($, trail)
-        const under = typeof e.under === 'string' ? e.under.trim() : ''
         // Said where it belongs: there. Otherwise under the task at hand, or the one left in this turn.
         const place =
           under === ''
@@ -954,7 +1102,7 @@ export const register: Register = (on, options) => {
 
           return asks.reduce(
             (kept, fork) => filed(kept, fork, true),
-            named.reduce((kept, fork) => filed(kept, fork, false), one),
+            named.reduce((kept, fork) => filed(kept, fork, false), settleAll(one)),
           )
         })
         break
@@ -992,6 +1140,36 @@ export const register: Register = (on, options) => {
     }
 
     // Short on purpose: every word of a result stays in the conversation and is read again with each request.
+    // A task that was being worked on and is now left open by this call is named: it is continued by id, or closed.
+    if (action === 'enter' || action === 'next') {
+      const wasActive = new Set(before.nodes.filter(node => node.state === 'active').map(node => node.id))
+      const leftOpen = held.nodes.filter(node => node.state === 'open' && node.startedAt !== null && wasActive.has(node.id))
+
+      if (leftOpen.length > 0) {
+        lines.push(
+          `Left open: ${leftOpen.map(node => `[${node.id}] ${node.title}`).join('; ')}. Continue it by id, or close it with "leave" after entering it.`,
+        )
+      }
+    }
+
+    if (settling.length > 0) {
+      lines.push(`Settled: ${settling.map(item => `[${item.id}] ${item.title}`).join('; ')}`)
+    }
+
+    if (skipped.length > 0) {
+      lines.push(`Not waiting, skipped: ${skipped.join(', ')}`)
+    }
+
+    // A new decision is the moment to settle the old one it replaces: the others waiting are named, with their ids.
+    if (asks.length > 0 && ['park', 'leave', 'next'].includes(action)) {
+      const justFiled = new Set(asks.map(one => parkedOf(held, one)?.id))
+      const waiting = decisionsText({ ...held, parked: held.parked.filter(item => !justFiled.has(item.id)) })
+
+      if (waiting !== '') {
+        lines.push(waiting)
+      }
+    }
+
     if (action === 'park') {
       const touched = new Set([...named, ...asks].map(one => parkedOf(held, one)?.id))
 
@@ -1169,37 +1347,29 @@ export const register: Register = (on, options) => {
     // The engine keeps five cells at the right end of the band's first row for that mark; the
     // title row stands there, so the frame under it can take the whole width of the terminal.
     const wide = e.surface === 'terminal' ? e.props.bodyColumns + 5 : undefined
-    const all = paneRows(
-      held,
-      jobs,
-      await $.clock.now(),
-      // The frame and its padding take two cells on either side.
-      Math.max(20, (wide ?? e.props.bodyColumns) - 4),
-      await read($, opened),
-      await read($, unfolded),
-      true,
-    )
+    // The frame and its padding take two cells on either side.
+    const width = Math.max(20, (wide ?? e.props.bodyColumns) - 4)
+    const now = await $.clock.now()
+    const pressed = await read($, opened)
+    const all = paneRows(held, jobs, now, width, pressed, await read($, unfolded), true)
     const room = roomOf()
     const isTall = await read($, expanded)
-    // Cut where a fork begins, never between the lines of one that wraps.
-    let cut = room - 1
+    // The whole tree when it fits or is asked for; otherwise the strip: what matters most,
+    // one row each, and under it the row that opens the rest.
+    const isWhole = all.length <= room
+    const strip = isTall || isWhole ? null : stripRows(held, jobs, now, width, room - 1, pressed)
+    const shown = strip === null ? all : strip.rows
 
-    while (cut > 1 && (all[cut]?.fork?.line ?? 0) > 0) {
-      cut -= 1
-    }
-
-    const shown = isTall || all.length <= room ? all : all.slice(0, cut)
-
-    const more = shown.length < all.length && (
+    const more = strip !== null && (
       <Button
         plain
         dimColor
         key="more"
-        label={`▾ ${all.length - shown.length} more`}
+        label={`▾ ${strip.hidden === '' ? 'the whole tree' : strip.hidden}`}
         onPress={() => update($, expanded, () => true)}
       />
     )
-    const fewer = isTall && all.length > room && (
+    const fewer = isTall && !isWhole && (
       <Button plain dimColor key="fewer" label="▴ show fewer" onPress={() => update($, expanded, () => false)} />
     )
 
