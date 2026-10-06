@@ -65,10 +65,8 @@ the conversation.
   open, then forks only noted, each with its id and its age, titles cut to the
   width. The last row counts what is left out (`▾ 9 more decisions, 71 more
   noted`) and opens the whole tree; `▴ show fewer` cuts it back.
-- Opened whole, the tree comes in pages inside a box of fixed height (what the
-  band allows, a sixth of the screen at least): `more ▸ 2/5` and `◂ back` turn
-  them. The box never scrolls, so nothing jumps and the title row with the
-  counts stays where it is.
+- Opened whole, the tree is taller than the band and scrolls inside the box.
+  The title row with the counts stays in view while it does.
 
 ## Using it
 

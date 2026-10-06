@@ -61,7 +61,7 @@ export type TrailWork = {
 
 declare module 'claude-code' {
   interface PluginState {
-    trail: { trail: Trail; work: TrailWork[]; opened: string | null; unfolded: string[]; page: number }
+    trail: { trail: Trail; work: TrailWork[]; opened: string | null; unfolded: string[]; expanded: boolean }
   }
 
   interface McpToolInputs {
