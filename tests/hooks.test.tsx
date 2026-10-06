@@ -13,7 +13,7 @@ const BAND = {
   props: {
     hasSurvey: false,
     isWorking: false,
-    maxRows: 6,
+    maxRows: 24,
     bodyColumns: 80,
     scroll: { offset: 0, bodyRows: 6 },
     view: {},
@@ -1252,7 +1252,7 @@ test('where no pane docks, the tree stands in the band above the prompt, cut to 
 
   await press(/2 more noted/)
 
-  // The whole tree, in pages of the same height as the strip: the box never grows, nothing scrolls.
+  // Opened, the box takes what the band allows: here the whole tree fits in one page, so no page buttons.
   expect(await rowsOf(band)).toEqual([
     'Trail9 forks open',
     'NOTED, NOT DONE',
@@ -1262,16 +1262,10 @@ test('where no pane docks, the tree stands in the band above the prompt, cut to 
     '├ · Fork four [p5]',
     '├ · Fork five [p6]',
     '├ · Fork six [p7]',
-    '▴ show fewermore ▸ 1/2',
-  ])
-
-  await press(/more ▸ 1\/2/)
-
-  expect((await rowsOf(band)).slice(-4)).toEqual([
     '├ · Fork seven [p8]',
     '├ · Fork eight [p9]',
     '└ · Fork nine [p10]',
-    '▴ show fewer◂ back',
+    '▴ show fewer',
   ])
 
   // The rows are pressable here as in the pane.
@@ -1281,12 +1275,8 @@ test('where no pane docks, the tree stands in the band above the prompt, cut to 
     '└ ▾ Fork nine [p10]',
     '    raised under 1 min ago',
     '    take up  drop',
-    '▴ show fewer◂ back',
+    '▴ show fewer',
   ])
-
-  await press(/back/)
-
-  expect((await rowsOf(band))[1]).toBe('NOTED, NOT DONE')
 
   await press(/show fewer/)
 
@@ -1739,4 +1729,42 @@ test('"under" must name a task not finished, and a node that exists keeps its pl
 
   expect(await track($, { action: 'enter', title: 'n4', under: 'session' })).toContain('already has its place')
   expect(await track($, { action: 'confirm' })).toContain('Session › B › C')
+})
+
+test('the box never takes more rows than the band allows, so the engine has nothing to scroll', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+  await track($, { action: 'enter', title: 'Build the index', kind: 'step' })
+
+  for (const title of ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine']) {
+    await track($, { action: 'park', title: `Fork ${title}` })
+  }
+
+  // A bottom slot of six rows: the title, three rows, the buttons, the bottom edge.
+  const SMALL = {
+    ...BAND,
+    surface: 'terminal',
+    viewport: { columns: 120, rows: 48, isFullscreen: true },
+    props: { ...BAND.props, maxRows: 6 },
+  } as const
+  const band = await $.ui.mount(SMALL)
+  const rows = await rowsOf(band)
+
+  expect(rows).toEqual([
+    'Trail9 forks open',
+    '▸ Build the index · under 1 min',
+    '· Fork nine [p11] · under 1 min',
+    '· Fork eight [p10] · under 1 min',
+    '▾ 7 more noted',
+  ])
+
+  // Opened, the pages are as tall as the slot allows and no taller.
+  await band.press({ key: (await band.find({ type: 'Button', text: /7 more noted/ }))?.key ?? '' })
+
+  const opened = await rowsOf(band)
+
+  expect(opened.length).toBe(5)
+  expect(opened[0]).toBe('Trail9 forks open')
+  expect(opened.at(-1)).toMatch(/^▴ show fewermore ▸ 1\/\d$/)
+  await band.unmount()
 })

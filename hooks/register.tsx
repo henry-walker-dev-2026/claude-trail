@@ -1363,7 +1363,10 @@ export const register: Register = (on, options) => {
     const all = paneRows(held, jobs, now, width, pressed, await read($, unfolded), true)
     const room = roomOf()
     const current = await read($, page)
-    const isWhole = all.length <= room
+    // The band allows `maxRows`; the box spends one on the title, one on its bottom edge, one on the row
+    // of buttons under the rows. More than that and the engine would scroll the box, title and all.
+    const cap = Math.max(1, e.props.maxRows - 3)
+    const isWhole = all.length <= Math.min(room, cap + 1)
     const nav: ReturnType<typeof Button>[] = []
     let shown: PaneRow[]
 
@@ -1373,7 +1376,7 @@ export const register: Register = (on, options) => {
     if (isWhole) {
       shown = all
     } else if (current === 0) {
-      const strip = stripRows(held, jobs, now, width, room - 1, pressed)
+      const strip = stripRows(held, jobs, now, width, Math.min(room - 1, cap), pressed)
 
       shown = strip.rows
       nav.push(
@@ -1386,8 +1389,8 @@ export const register: Register = (on, options) => {
         />,
       )
     } else {
-      // Opened, the box takes what the band allows (the title, the page and this row inside it), a sixth of the screen at least.
-      const per = Math.max(room, e.props.maxRows - 2) - 1
+      // Opened, a page takes what the band allows, up to half the screen; never less than the strip had.
+      const per = Math.min(cap, Math.max(room - 1, Math.floor((screenRows ?? 48) / 2) - 3))
       const pages = Math.max(1, Math.ceil(all.length / per))
       const at = Math.min(current, pages)
 
