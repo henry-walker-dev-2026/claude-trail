@@ -1708,3 +1708,39 @@ test('"under" must name a task not finished, and a node that exists keeps its pl
   expect(await track($, { action: 'enter', title: 'n4', under: 'session' })).toContain('already has its place')
   expect(await track($, { action: 'confirm' })).toContain('Session › B › C')
 })
+
+test('the title row stays in view while the person scrolls inside the box', async ($, on) => {
+  await boot($, on)
+  await command($, '')
+
+  for (const title of ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine']) {
+    await track($, { action: 'park', title: `Fork ${title}` })
+  }
+
+  const INLINE = { ...BAND, surface: 'terminal', viewport: { columns: 120, rows: 48, isFullscreen: false } } as const
+  const band = await $.ui.mount(INLINE)
+
+  await band.press({ key: (await band.find({ type: 'Button', text: /2 more noted/ }))?.key ?? '' })
+  await band.unmount()
+
+  // Opened whole, the tree is ten rows under the title. Scrolled three rows down, the engine's window
+  // begins at the tree's third row: the title is drawn there, and the three rows above are out of sight.
+  const scrolled = await $.ui.mount({ ...INLINE, props: { ...INLINE.props, scroll: { offset: 3, bodyRows: 6 } } })
+  const rows = await rowsOf(scrolled)
+
+  expect(rows.slice(0, 5)).toEqual([
+    'NOTED, NOT DONE',
+    '├ · Fork one [p2]',
+    '├ · Fork two [p3]',
+    'Trail9 forks open',
+    '├ · Fork three [p4]',
+  ])
+  expect(rows.at(-1)).toBe('▴ show fewer')
+  await scrolled.unmount()
+
+  // Back at the top, the title is the first row again.
+  const top = await $.ui.mount(INLINE)
+
+  expect((await rowsOf(top))[0]).toBe('Trail9 forks open')
+  await top.unmount()
+})

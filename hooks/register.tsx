@@ -1382,19 +1382,27 @@ export const register: Register = (on, options) => {
       <Button plain dimColor key="fewer" label="▴ show fewer" onPress={() => update($, expanded, () => false)} />
     )
 
+    const body = [...drawRows($, e, shown), more, fewer].filter(row => row !== false)
+    // The title row stays in view while the person scrolls inside the box: it is drawn at the
+    // window's first row, and the rows scrolled past stand above it, out of sight.
+    const scrolled = Math.min(Math.max(0, e.props.scroll.offset), body.length)
+
     // Elsewhere than on the terminal the surface draws the frame, with the title as its first row.
     if (wide === undefined) {
+      const title = (
+        <Box justifyContent="space-between" columnGap={2}>
+          <Text bold color="suggestion">
+            Trail
+          </Text>
+          {line}
+        </Box>
+      )
+
       return (
         <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
-          <Box justifyContent="space-between" columnGap={2}>
-            <Text bold color="suggestion">
-              Trail
-            </Text>
-            {line}
-          </Box>
-          {drawRows($, e, shown)}
-          {more}
-          {fewer}
+          {body.slice(0, scrolled)}
+          {title}
+          {body.slice(scrolled)}
         </Box>
       )
     }
@@ -1406,25 +1414,29 @@ export const register: Register = (on, options) => {
     const rule = '─'.repeat(
       Math.max(1, e.props.bodyColumns - head.length - 'Trail'.length - said.length - (said === '' ? 1 : 2)),
     )
-    const framed = [...drawRows($, e, shown), more, fewer].filter(row => row !== false)
+    const title = (
+      <Box>
+        <Text dimColor>{head}</Text>
+        <Text bold color="suggestion">
+          Trail
+        </Text>
+        <Text dimColor>{` ${rule}${said === '' ? '' : ' '}`}</Text>
+        {held.isTripped ? <Text color="warning">{said}</Text> : <Text dimColor>{said}</Text>}
+      </Box>
+    )
+    const sided = (row: (typeof body)[number]) => (
+      <Box width={wide}>
+        <Text dimColor>{'│ '}</Text>
+        <Box flexGrow={1}>{row}</Box>
+        <Text dimColor>{' │'}</Text>
+      </Box>
+    )
 
     return (
       <Box flexDirection="column">
-        <Box>
-          <Text dimColor>{head}</Text>
-          <Text bold color="suggestion">
-            Trail
-          </Text>
-          <Text dimColor>{` ${rule}${said === '' ? '' : ' '}`}</Text>
-          {held.isTripped ? <Text color="warning">{said}</Text> : <Text dimColor>{said}</Text>}
-        </Box>
-        {framed.map(row => (
-          <Box width={wide}>
-            <Text dimColor>{'│ '}</Text>
-            <Box flexGrow={1}>{row}</Box>
-            <Text dimColor>{' │'}</Text>
-          </Box>
-        ))}
+        {body.slice(0, scrolled).map(sided)}
+        {title}
+        {body.slice(scrolled).map(sided)}
         <Box width={wide}>
           <Text dimColor>{`╰${'─'.repeat(wide - 2)}╯`}</Text>
         </Box>
