@@ -378,7 +378,11 @@ const ended = async (
   }
 }
 
-/** An agent is gone for good: what it started and never saw end goes unknown, since those ends were told to it, never here. */
+/**
+ * An agent's turn is over, for good or until a message wakes it: what it started and never
+ * saw end goes unknown, since those ends are told to it, never here. A notice that does
+ * reach here later still sets the record straight.
+ */
 const orphan = async ($: EngineInterface, parentId: string) => {
   const held = await read($, work)
 
@@ -406,9 +410,16 @@ const reconcile = async ($: EngineInterface, isNewProcess: boolean) => {
   }
 
   // The engine keeps listing an agent after its end, with that end as its status: only one not ended is live.
+  // And only one in a turn (or about to start one) can hear the ends of the jobs it started: an idle teammate cannot.
+  const agents = await $.agent.list()
   const live = new Set(
-    (await $.agent.list())
+    agents
       .filter(agent => agent.status !== 'completed' && agent.status !== 'failed' && agent.status !== 'killed')
+      .map(agent => agent.id),
+  )
+  const hearing = new Set(
+    agents
+      .filter(agent => agent.status === 'pending' || agent.status === 'running' || agent.status === 'waiting')
       .map(agent => agent.id),
   )
   const givenUp = new Set((await read($, trail)).nodes.filter(node => node.state === 'dropped').map(node => node.id))
@@ -418,7 +429,7 @@ const reconcile = async ($: EngineInterface, isNewProcess: boolean) => {
       ? !live.has(item.id)
       : isNewProcess ||
         (item.nodeId !== null && givenUp.has(item.nodeId)) ||
-        (item.parentId !== null && !live.has(item.parentId)) ||
+        (item.parentId !== null && !hearing.has(item.parentId)) ||
         (item.kind === 'monitor' && now - item.startedAt > MONITOR_CAP)
   const seen = held.map(item => (item.state === 'running' && isLost(item) ? { ...item, state: 'unknown' as const } : item))
 
@@ -717,9 +728,7 @@ export const register: Register = (on, options) => {
         await $.clock.now(),
       )
 
-      if ((await read($, work)).some(item => item.id === agentId && item.state !== 'idle')) {
-        await orphan($, agentId)
-      }
+      await orphan($, agentId)
     }
 
     return next(e)

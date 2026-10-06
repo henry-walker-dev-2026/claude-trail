@@ -1437,7 +1437,7 @@ test('an agent that ends takes the jobs it started into the unknown; a late noti
   expect((await paneTexts($)).some(row => row.includes('✓ shell · Judge batch one · done after under 1 min'))).toBe(true)
 })
 
-test('a teammate that answered only waits, and what it started keeps running', async ($, on) => {
+test('a teammate that answered only waits; what it started is unknown until a notice says', async ($, on) => {
   await boot($, on)
   await command($, '')
   await track($, { action: 'enter', title: 'Judge the pairs', kind: 'step' })
@@ -1454,7 +1454,12 @@ test('a teammate that answered only waits, and what it started keeps running', a
   const rows = await paneTexts($)
 
   expect(rows.some(row => row.includes('◌ teammate · teammate: batch · idle after under 1 min'))).toBe(true)
-  expect(rows.some(row => row.includes('● shell · Judge batch two · under 1 min'))).toBe(true)
+  // Idle, the teammate hears nothing; neither does the main conversation, so the shell's state is not known.
+  expect(rows.some(row => row.includes('? shell · Judge batch two · unknown'))).toBe(true)
+
+  await notice($, '<task-id>bash-1</task-id>\n<status>completed</status>')
+
+  expect((await paneTexts($)).some(row => row.includes('✓ shell · Judge batch two · done after under 1 min'))).toBe(true)
 })
 
 test('a watch that ran past the longest allowed is unknown once the turn ends', async ($, on) => {
@@ -1506,6 +1511,15 @@ test('an agent the engine still lists as ended is not live: what it started goes
   expect(rows.some(row => row.includes('? shell · Judge batch one · unknown'))).toBe(true)
   expect(rows.some(row => row.includes('● agent · Explore: scout · under 1 min'))).toBe(true)
   expect(rows.some(row => row.includes('● shell · Scan the goods · under 1 min'))).toBe(true)
+
+  // The scout answers and waits: idle, it hears no more, so its shell is unknown at the next turn's end.
+  listed = [
+    { id: 'agent-pilot', description: 'pilot', type: 'Explore', status: 'completed' },
+    { id: 'agent-scout', description: 'scout', type: 'Explore', status: 'idle' },
+  ]
+  await finish($)
+
+  expect((await paneTexts($)).some(row => row.includes('? shell · Scan the goods · unknown'))).toBe(true)
 })
 
 /** The id of the one fork a park result names. */

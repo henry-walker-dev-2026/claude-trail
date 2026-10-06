@@ -117,8 +117,10 @@ whether optional is enough.
 
 Background jobs show under the task they were started from. Their ends are
 heard from the engine's notices: a status, a Monitor's expiry, every id a notice
-names. A job started inside an agent that has ended, and a Monitor older than
-the longest watch the engine allows, are marked unknown rather than running.
+names. A job started inside an agent that has ended or waits idle (its ends are told
+to that agent, never here), and a Monitor older than the longest watch the
+engine allows, are marked unknown rather than running; a notice that arrives
+after all still sets the record straight.
 
 So the tree is only as true as Claude's reports. In practice it adds and closes
 forks by itself; a step done without being reported stays shown as not started.
